@@ -425,7 +425,8 @@ with tab_build:
         st.session_state.onetime_df = onetime_edited
         onetime_calc = compute_line_totals(onetime_edited, "Qty/Days", "Unit rate", st.session_state.discount)
         onetime_total = onetime_calc["Line total"].sum() if not onetime_calc.empty else 0.0
-        st.dataframe(onetime_calc[["Description", "Line total"]], use_container_width=True, hide_index=True) if not onetime_calc.empty else None
+        if not onetime_calc.empty:
+            st.dataframe(onetime_calc[["Description", "Line total"]], use_container_width=True, hide_index=True)
 
         b_t1, b_t2 = st.columns(2)
         st.session_state.terms = st.text_input("Payment terms", st.session_state.terms)
@@ -446,7 +447,8 @@ with tab_build:
         st.session_state.monthly_df = monthly_edited
         monthly_calc = compute_line_totals(monthly_edited, "Qty", "Unit rate / month", st.session_state.discount)
         monthly_total = monthly_calc["Line total"].sum() if not monthly_calc.empty else 0.0
-        st.dataframe(monthly_calc[["Description", "Line total"]], use_container_width=True, hide_index=True) if not monthly_calc.empty else None
+        if not monthly_calc.empty:
+            st.dataframe(monthly_calc[["Description", "Line total"]], use_container_width=True, hide_index=True)
 
         with st.expander("Tiered per-order fee helper", expanded=False):
             st.caption("Mirrors the WMS-style pricing used with Actually Group (e.g. 2,500 orders @ "
