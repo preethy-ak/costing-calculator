@@ -154,10 +154,7 @@ def apply_template(kind: str, pm, dev, qc):
             onetime_row("Tech Development", 8, dev, False, "API build + testing hooks"),
             onetime_row("Testing & UAT", 3, qc, False, "Based on past PUMA UAT effort"),
         ])
-        st.session_state.monthly_df = pd.DataFrame([
-            monthly_row("API Maintenance", 1, 500, False, "Per Graas account / brand"),
-        ])
-    elif kind == "vend":
+        st.session_state.monthly_df = pd.DataFrame([], columns=MONTHLY_COLS)
         st.session_state.ptype = "POS / Vend-style Integration"
         st.session_state.discount = 30.0
         st.session_state.onetime_df = pd.DataFrame([
@@ -331,9 +328,7 @@ defaults = {
         onetime_row("Tech Development", 8, 350, False, "API build + testing hooks"),
         onetime_row("Testing & UAT", 3, 180, False, "Based on past PUMA UAT effort"),
     ]),
-    "monthly_df": pd.DataFrame([
-        monthly_row("API Maintenance", 1, 500, False, "Per Graas account / brand"),
-    ]),
+    "monthly_df": pd.DataFrame([], columns=MONTHLY_COLS),
     "tier_orders": 2000.0, "tier_threshold": 2500.0, "tier_rate1": 1.95, "tier_rate2": 1.30,
     "quote_text": "",
 }
@@ -449,6 +444,21 @@ with tab_build:
         monthly_total = monthly_calc["Line total"].sum() if not monthly_calc.empty else 0.0
         if not monthly_calc.empty:
             st.dataframe(monthly_calc[["Description", "Line total"]], use_container_width=True, hide_index=True)
+
+        st.caption("Optional add-ons — not included unless you click one:")
+        oa1, oa2, oa3 = st.columns(3)
+        if oa1.button("+ API Maintenance ($500/mo)", use_container_width=True):
+            new_row = pd.DataFrame([monthly_row("API Maintenance", 1, 500, False, "Per Graas account / brand")])
+            st.session_state.monthly_df = pd.concat([st.session_state.monthly_df, new_row], ignore_index=True)
+            st.rerun()
+        if oa2.button("+ OMS/Turbocharger subscription ($150/mo)", use_container_width=True):
+            new_row = pd.DataFrame([monthly_row("OMS (Turbocharger Execute) subscription", 1, 150, False, "Based on orders < 10,000")])
+            st.session_state.monthly_df = pd.concat([st.session_state.monthly_df, new_row], ignore_index=True)
+            st.rerun()
+        if oa3.button("+ Agentic Data Analyst ($250/mo, optional)", use_container_width=True):
+            new_row = pd.DataFrame([monthly_row("Agentic Data Analyst (hoppr) subscription", 1, 250, False, "Orders < 10,000 & more than 10 platforms")])
+            st.session_state.monthly_df = pd.concat([st.session_state.monthly_df, new_row], ignore_index=True)
+            st.rerun()
 
         with st.expander("Tiered per-order fee helper", expanded=False):
             st.caption("Mirrors the WMS-style pricing used with Actually Group (e.g. 2,500 orders @ "
