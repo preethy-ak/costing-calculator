@@ -286,38 +286,6 @@ def historical_records():
             source='Email: "Re: WMS" thread, 18 Jan 2026 — Preethy AK to Kane Gan',
         ),
         dict(
-            id="hist_actually_wms", date_label="23 Dec 2025 (email, final proposal)",
-            client="Actually Group", project="WMS warehouse setup — Singapore, Malaysia, Indonesia",
-            type="WMS Warehouse Setup", currency="SGD", stage="Won", discount=0,
-            pm_rate=250, dev_rate=350, qc_rate=180,
-            onetime_rows=[
-                onetime_row("Warehouse setup — Singapore (new, moving off Humanize)", 1, 1800, False,
-                             "New warehouse: account, locations, training"),
-                onetime_row("Warehouse setup — Indonesia", 1, 1800, False, ""),
-                onetime_row("Warehouse setup — Malaysia (small storeroom, <1000 pcs)", 1, 1000, False,
-                             "Client-requested lower fee — smaller storeroom"),
-            ],
-            monthly_rows=[
-                monthly_row("Per-order fulfilment fee — all warehouses (tiered, illustrative @2,000 orders/mo)",
-                             1, 1.95 * 2000, False,
-                             "Up to 2,500 orders @ SGD1.95, overflow @ SGD1.30. Replaces the earlier flat "
-                             "SGD1,000/month Humanize maintenance fee and the earlier SGD390/month Turbo "
-                             "fee draft — per Kane Gan's 24 Dec request and Cindy's 29 Dec confirmation, "
-                             "everything was folded into this one per-order fee. Actual monthly amount "
-                             "will vary with real order volume, not this illustrative figure."),
-            ],
-            notes=("Negotiated down from an initial SGD 7,800 combined setup-fee quote after Paul Khor "
-                   "pushed back comparing to Anchanto/Murho. Existing Humanize (SG) warehouse carries no "
-                   "new setup fee while in use; its flat monthly maintenance fee was folded into the new "
-                   "per-order fee per Kane Gan's request (confirmed 29 Dec 2025) rather than charged "
-                   "separately. One-time setup figures reflect Kane's 8 Dec counter-proposal; the final "
-                   "signed figures were in an email screenshot attachment not captured in text here — "
-                   "worth confirming against the actual contract before relying on these for reporting."),
-            terms="Setup fees invoiced only when warehouse setup begins",
-            onetime_total=1800 + 1800 + 1000, monthly_total=1.95 * 2000,
-            source='Email: "Re: WMS" thread, Nov 2025 - Jan 2026 — Cindy Chiah / Preethy AK to Kane Gan & Paul Khor',
-        ),
-        dict(
             id="hist_modernlink_bc", date_label='Costing file — "Final - Modern Link - Microsoft" tab',
             client="Modern Link", project="Microsoft Business Central integration (pull orders from Graas)",
             type="Custom API Integration", currency="USD", stage="Cancelled", discount=0,
