@@ -114,6 +114,55 @@ def get_costing(cid: str) -> dict:
     return rec
 
 
+def export_raw_csv() -> bytes:
+    """Full-fidelity export (all raw columns, including the line-item JSON) so a restore
+    can reconstruct every record exactly — used as a manual backup against the fact that
+    Streamlit Community Cloud's free tier does not guarantee this SQLite file survives a
+    container restart or redeploy."""
+    conn = get_conn()
+    df = pd.read_sql_query("SELECT * FROM costings", conn)
+    conn.close()
+    return df.to_csv(index=False).encode("utf-8")
+
+
+def restore_from_csv(file):
+    """Restore (upsert) costings from a CSV produced by export_raw_csv(). Returns (ok_count, failed_count)."""
+    df = pd.read_csv(file)
+    ok, failed = 0, 0
+    required = ["id", "saved_at", "client", "project", "type", "currency", "stage",
+                "discount", "pm_rate", "dev_rate", "qc_rate", "onetime_json", "monthly_json",
+                "onetime_total", "monthly_total"]
+    for _, r in df.iterrows():
+        try:
+            record = {
+                "id": str(r["id"]),
+                "saved_at": str(r["saved_at"]),
+                "date_label": str(r.get("date_label", "") or ""),
+                "client": str(r["client"]),
+                "project": str(r["project"]),
+                "type": str(r["type"]),
+                "currency": str(r["currency"]),
+                "stage": str(r["stage"]),
+                "source": str(r.get("source", "") or ""),
+                "discount": float(r["discount"]),
+                "pm_rate": float(r["pm_rate"]),
+                "dev_rate": float(r["dev_rate"]),
+                "qc_rate": float(r["qc_rate"]),
+                "onetime_rows": json.loads(r["onetime_json"]),
+                "monthly_rows": json.loads(r["monthly_json"]),
+                "notes": str(r.get("notes", "") or ""),
+                "terms": str(r.get("terms", "") or ""),
+                "onetime_total": float(r["onetime_total"]),
+                "monthly_total": float(r["monthly_total"]),
+            }
+            save_costing(record)
+            ok += 1
+        except Exception as e:
+            print("restore row failed:", e)
+            failed += 1
+    return ok, failed
+
+
 # ----------------------------------------------------------------------------
 # Row-level helpers
 # ----------------------------------------------------------------------------
@@ -587,6 +636,30 @@ with tab_tracker:
             added, updated = seed_historical()
             st.success(f"{added} added, {updated} refreshed")
             st.rerun()
+
+    with st.expander("⚠️ Back up / restore (read before you close this tab)", expanded=False):
+        st.warning(
+            "On Streamlit Community Cloud's free tier, this app's storage is **not guaranteed to "
+            "survive a restart** — if the app goes idle and sleeps, or you push a code update, the "
+            "tracker can come back empty except for the historical deals. Download a backup before "
+            "closing if you've added anything you don't want to lose, and restore it here if the "
+            "tracker ever comes back empty."
+        )
+        bc1, bc2 = st.columns(2)
+        with bc1:
+            st.download_button(
+                "Download all costings (CSV backup)",
+                data=export_raw_csv(),
+                file_name=f"graas_costings_backup_{datetime.now().strftime('%Y%m%d_%H%M')}.csv",
+                mime="text/csv",
+                use_container_width=True,
+            )
+        with bc2:
+            uploaded = st.file_uploader("Restore from a backup CSV", type="csv", key="restore_csv")
+            if uploaded is not None:
+                ok, failed = restore_from_csv(uploaded)
+                st.success(f"Restored {ok} record(s)" + (f", {failed} failed" if failed else ""))
+                st.rerun()
 
     df = load_all_costings()
 
