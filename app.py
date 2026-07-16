@@ -155,6 +155,8 @@ def apply_template(kind: str, pm, dev, qc):
             onetime_row("Testing & UAT", 3, qc, False, "Based on past PUMA UAT effort"),
         ])
         st.session_state.monthly_df = pd.DataFrame([], columns=MONTHLY_COLS)
+        st.session_state.notes = ""
+    elif kind == "vend":
         st.session_state.ptype = "POS / Vend-style Integration"
         st.session_state.discount = 30.0
         st.session_state.onetime_df = pd.DataFrame([
@@ -173,12 +175,12 @@ def apply_template(kind: str, pm, dev, qc):
             onetime_row("Warehouse setup fee — Warehouse 2 (10% off)", 1, 1620, False, ""),
             onetime_row("Warehouse setup fee — Warehouse 3 (10% off)", 1, 1620, False, ""),
         ])
-        st.session_state.monthly_df = pd.DataFrame([
-            monthly_row("Graas Turbo subscription", 1, 390, False, "Per region bundle"),
-        ])
+        st.session_state.monthly_df = pd.DataFrame([], columns=MONTHLY_COLS)
         st.session_state.notes = ("Setup fees apply only to new warehouses; an existing warehouse "
-                                   "already on Graas WMS carries no new setup fee. Monthly maintenance "
-                                   "is charged per order once live — see tiered fee helper below.")
+                                   "already on Graas WMS carries no new setup fee. Per the final Actually "
+                                   "Group agreement (confirmed 29 Dec 2025), monthly maintenance is a "
+                                   "single per-order fee across all warehouses, not a flat platform fee — "
+                                   "use the tiered per-order fee helper below to add it.")
     elif kind == "extract":
         st.session_state.ptype = "Data Extract Service"
         st.session_state.onetime_df = pd.DataFrame([
