@@ -128,11 +128,12 @@ def _row_internal_total(rows):
 
 
 def _row_effort_days(rows):
-    """Sum of Qty/Days across one-time rows — used as the 'quoted effort' figure."""
-    total = 0.0
-    for r in rows or []:
-        total += r.get("Qty/Days", 0) or 0
-    return total
+    """Total elapsed project duration = MAX(Qty/Days) across one-time rows, not the sum.
+    Roles typically run concurrently within the same project span (e.g. PM is 'deployed
+    across effort duration' — their day count already covers the same calendar days Dev
+    and Testing work within, not additional days on top). Summing would double-count."""
+    days = [r.get("Qty/Days", 0) or 0 for r in (rows or [])]
+    return max(days) if days else 0.0
 
 
 def _row_undiscounted_total(rows):
@@ -766,80 +767,101 @@ with tab_build:
             client_name = st.session_state.client or "[Client]"
             ptype = st.session_state.ptype
 
-            lines = [f"Hi {recipient},", ""]
-            lines.append(
+            # --- INTRO (plain text — copy this first) ---
+            intro = [f"Hi {recipient},", ""]
+            intro.append(
                 f"Please find below the details of the additional solution you requested for "
                 f"{project}, including the scope of work and cost details."
             )
             if ptype in ("Custom API Integration", "POS / Vend-style Integration"):
-                lines.append("")
-                lines.append(
+                intro.append("")
+                intro.append(
                     "As this functionality is currently not available in TC, a custom integration "
                     "is required. Accordingly, a one-time integration cost will apply, as discussed "
                     "earlier."
                 )
-            lines.append("")
-
-            # --- ONE-TIME (billable only — Internal cost/Margin never enter this draft) ---
             if not onetime_calc.empty and onetime_total > 0:
-                lines.append(f"One-time integration cost: {sym}{onetime_total:,.2f}")
-                quoted_effort = onetime_edited["Qty/Days"].sum() if not onetime_edited.empty else 0
+                intro.append("")
+                intro.append(f"One-time integration cost: {sym}{onetime_total:,.2f}")
+                quoted_effort = onetime_edited["Qty/Days"].max() if not onetime_edited.empty else 0
                 if quoted_effort:
-                    lines.append(f"Estimated effort: {quoted_effort:.0f} working days (development and testing)")
-                lines.append("")
-                lines.append(f"{client_name}_ {project}")
-                lines.append("Scope\tPrice")
-                for _, rr in onetime_calc.iterrows():
-                    lines.append(f"{rr['Description']}\t{sym}{rr['Line total']:,.2f}")
-                lines.append(f"Total Cost\t{sym}{onetime_total:,.2f}")
-                lines.append("")
+                    intro.append(f"Estimated effort: {quoted_effort:.0f} working days (development and testing)")
+                intro.append("")
+                intro.append(f"{client_name}_ {project}")
+            st.session_state.quote_intro = "\n".join(intro)
 
-            # --- MONTHLY (billable only) ---
+            # --- ONE-TIME TABLE (billable only — rendered as a real table, not plain text) ---
+            onetime_table = None
+            if not onetime_calc.empty and onetime_total > 0:
+                rows_tbl = [{"Scope": rr["Description"], "Price": f"{sym}{rr['Line total']:,.2f}"}
+                            for _, rr in onetime_calc.iterrows()]
+                rows_tbl.append({"Scope": "Total Cost", "Price": f"{sym}{onetime_total:,.2f}"})
+                onetime_table = pd.DataFrame(rows_tbl)
+            st.session_state.quote_onetime_table = onetime_table
+
+            # --- MONTHLY TABLE (billable only) ---
+            monthly_table, monthly_lead = None, ""
             if not monthly_calc.empty and monthly_total > 0:
-                lines.append(
+                monthly_lead = (
                     f"There will also be a monthly maintenance fee of {sym}{monthly_total:,.2f}, "
                     f"applicable after integration is completed (second month onwards)."
                 )
-                lines.append("")
-                lines.append("Scope\tPrice / month")
-                for _, rr in monthly_calc.iterrows():
-                    lines.append(f"{rr['Description']}\t{sym}{rr['Line total']:,.2f}")
-                lines.append(f"Total\t{sym}{monthly_total:,.2f} / month")
-                lines.append("")
+                rows_tbl = [{"Scope": rr["Description"], "Price / month": f"{sym}{rr['Line total']:,.2f}"}
+                            for _, rr in monthly_calc.iterrows()]
+                rows_tbl.append({"Scope": "Total", "Price / month": f"{sym}{monthly_total:,.2f} / month"})
+                monthly_table = pd.DataFrame(rows_tbl)
+            st.session_state.quote_monthly_lead = monthly_lead
+            st.session_state.quote_monthly_table = monthly_table
 
+            # --- CLOSING (plain text — copy this last) ---
+            outro = []
             if st.session_state.discount > 0:
-                lines.append(
+                outro.append(
                     f"The above rate reflects a preferential rate discounted {st.session_state.discount:.0f}% "
                     f"from the Graas standard tech rate card."
                 )
-            lines.append(
+                outro.append("")
+            outro.append(
                 "Please note that any scope changes or delays caused by external dependencies may "
                 "result in additional costs."
             )
-            lines.append("")
+            outro.append("")
             if st.session_state.terms:
-                lines.append(f"Payment terms: {st.session_state.terms}.")
-                lines.append("")
+                outro.append(f"Payment terms: {st.session_state.terms}.")
+                outro.append("")
             if st.session_state.notes:
-                lines.append(st.session_state.notes)
-                lines.append("")
-            lines.append("Please confirm if this works for you, and we'll proceed accordingly.")
-            lines.append("")
-            lines.append("Regards,")
-            lines.append("PREETHY AK")
-            lines.append("Director- Marketplace Delivery")
-            lines.append("e. preethy@graas.ai")
+                outro.append(st.session_state.notes)
+                outro.append("")
+            outro.append("Please confirm if this works for you, and we'll proceed accordingly.")
+            outro.append("")
+            outro.append("Regards,")
+            outro.append("PREETHY AK")
+            outro.append("Director- Marketplace Delivery")
+            outro.append("e. preethy@graas.ai")
+            st.session_state.quote_outro = "\n".join(outro)
+            st.session_state.quote_text = "generated"  # just a flag that a draft exists
 
-            st.session_state.quote_text = "\n".join(lines)
-
-        if st.session_state.quote_text:
-            st.text_area("Client-ready email draft", st.session_state.quote_text, height=340)
+        if st.session_state.get("quote_text"):
             st.caption(
-                "Select all and copy into your email client. This draft is built only from the "
-                "billable ('Unit rate' × qty, after any ticked discount) figures — Internal cost/unit "
-                "and Margin are never read when generating this text, so they can't leak into a client "
-                "email even by accident."
+                "Three pieces to copy in order — the middle table(s) are real rendered tables, so "
+                "selecting and copying them keeps the table formatting when pasted into Gmail/Outlook "
+                "(a plain text box can't do that). This draft is built only from billable figures — "
+                "Internal cost/unit and Margin are never read here, so they can't leak into a client email."
             )
+            st.markdown("**1) Copy this intro:**")
+            st.text_area("Intro", st.session_state.quote_intro, height=180, label_visibility="collapsed")
+
+            if st.session_state.get("quote_onetime_table") is not None:
+                st.markdown("**2) Copy this table (select the cells + headers, then copy):**")
+                st.dataframe(st.session_state.quote_onetime_table, use_container_width=True, hide_index=True)
+
+            if st.session_state.get("quote_monthly_table") is not None:
+                st.markdown("**3) Copy this line, then this table:**")
+                st.text_area("Monthly lead-in", st.session_state.quote_monthly_lead, height=70, label_visibility="collapsed")
+                st.dataframe(st.session_state.quote_monthly_table, use_container_width=True, hide_index=True)
+
+            st.markdown("**4) Copy this closing:**")
+            st.text_area("Closing", st.session_state.quote_outro, height=260, label_visibility="collapsed")
 
 # ============================================================================
 # TAB: TRACKER & HISTORY
