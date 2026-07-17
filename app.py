@@ -553,14 +553,24 @@ with tab_build:
         st.caption('Development effort, setup fees, or any one-off line item. "Internal cost/unit" is '
                    'optional — fill it in to see cost and margin alongside the billable price, right in '
                    'this same table. Tick "Apply discount" to apply the rate-card discount above to that '
-                   'row. Note: the Billable/Internal cost/Margin columns refresh one edit behind — they '
-                   'update as soon as you commit your next change, same as the Total row below.')
+                   'row. The **Total** row at the bottom is computed, not editable — anything you type '
+                   'into it is discarded. Note: computed columns (including Total) refresh one edit '
+                   'behind — they catch up as soon as you commit your next change.')
         onetime_prev = compute_line_totals(
             normalize_df(st.session_state.onetime_df, ONETIME_COLS), "Qty/Days", "Unit rate", st.session_state.discount
         )
+        onetime_prev_total = onetime_prev["Line total"].sum() if not onetime_prev.empty else 0.0
+        onetime_prev_internal = onetime_prev["Internal cost total"].sum() if not onetime_prev.empty else 0.0
         onetime_merged_in = onetime_prev.rename(columns={"Line total": "Billable", "Internal cost total": "Internal cost"})
+        onetime_total_row = pd.DataFrame([{
+            "Description": "Total", "Qty/Days": None, "Unit rate": None, "Internal cost/unit": None,
+            "Apply discount": False, "Remarks": "",
+            "Billable": onetime_prev_total, "Internal cost": onetime_prev_internal,
+            "Margin": onetime_prev_total - onetime_prev_internal,
+        }])
+        onetime_editor_input = pd.concat([onetime_merged_in, onetime_total_row], ignore_index=True)
         onetime_edited_full = st.data_editor(
-            onetime_merged_in, num_rows="dynamic", use_container_width=True,
+            onetime_editor_input, num_rows="dynamic", use_container_width=True,
             key="onetime_editor",
             disabled=["Billable", "Internal cost", "Margin"],
             column_config={
@@ -573,19 +583,14 @@ with tab_build:
                 "Margin": st.column_config.NumberColumn(format="%.2f"),
             },
         )
-        onetime_edited = onetime_edited_full[ONETIME_COLS]
+        # Drop the synthetic Total row (and anything a user typed into it) before treating the
+        # rest as real line items — it's rebuilt fresh from real data on every rerun.
+        onetime_real_rows = onetime_edited_full[onetime_edited_full["Description"] != "Total"]
+        onetime_edited = onetime_real_rows[ONETIME_COLS]
         st.session_state.onetime_df = onetime_edited
         onetime_calc = compute_line_totals(onetime_edited, "Qty/Days", "Unit rate", st.session_state.discount)
         onetime_total = onetime_calc["Line total"].sum() if not onetime_calc.empty else 0.0
         onetime_internal_total = onetime_calc["Internal cost total"].sum() if not onetime_calc.empty else 0.0
-        if not onetime_calc.empty:
-            total_row = pd.DataFrame([{
-                "Description": "Total", "Qty/Days": "", "Unit rate": "", "Internal cost/unit": "",
-                "Apply discount": "", "Remarks": "",
-                "Billable": onetime_total, "Internal cost": onetime_internal_total,
-                "Margin": onetime_total - onetime_internal_total,
-            }])
-            st.dataframe(total_row, use_container_width=True, hide_index=True)
 
         b_t1, b_t2 = st.columns(2)
         st.session_state.terms = st.text_input("Payment terms", st.session_state.terms)
@@ -597,9 +602,18 @@ with tab_build:
         monthly_prev = compute_line_totals(
             normalize_df(st.session_state.monthly_df, MONTHLY_COLS), "Qty", "Unit rate / month", st.session_state.discount
         )
+        monthly_prev_total = monthly_prev["Line total"].sum() if not monthly_prev.empty else 0.0
+        monthly_prev_internal = monthly_prev["Internal cost total"].sum() if not monthly_prev.empty else 0.0
         monthly_merged_in = monthly_prev.rename(columns={"Line total": "Billable / mo", "Internal cost total": "Internal cost / mo"})
+        monthly_total_row = pd.DataFrame([{
+            "Description": "Total", "Qty": None, "Unit rate / month": None, "Internal cost/unit": None,
+            "Apply discount": False, "Remarks": "",
+            "Billable / mo": monthly_prev_total, "Internal cost / mo": monthly_prev_internal,
+            "Margin": monthly_prev_total - monthly_prev_internal,
+        }])
+        monthly_editor_input = pd.concat([monthly_merged_in, monthly_total_row], ignore_index=True)
         monthly_edited_full = st.data_editor(
-            monthly_merged_in, num_rows="dynamic", use_container_width=True,
+            monthly_editor_input, num_rows="dynamic", use_container_width=True,
             key="monthly_editor",
             disabled=["Billable / mo", "Internal cost / mo", "Margin"],
             column_config={
@@ -612,19 +626,12 @@ with tab_build:
                 "Margin": st.column_config.NumberColumn(format="%.2f"),
             },
         )
-        monthly_edited = monthly_edited_full[MONTHLY_COLS]
+        monthly_real_rows = monthly_edited_full[monthly_edited_full["Description"] != "Total"]
+        monthly_edited = monthly_real_rows[MONTHLY_COLS]
         st.session_state.monthly_df = monthly_edited
         monthly_calc = compute_line_totals(monthly_edited, "Qty", "Unit rate / month", st.session_state.discount)
         monthly_total = monthly_calc["Line total"].sum() if not monthly_calc.empty else 0.0
         monthly_internal_total = monthly_calc["Internal cost total"].sum() if not monthly_calc.empty else 0.0
-        if not monthly_calc.empty:
-            total_row = pd.DataFrame([{
-                "Description": "Total", "Qty": "", "Unit rate / month": "", "Internal cost/unit": "",
-                "Apply discount": "", "Remarks": "",
-                "Billable / mo": monthly_total, "Internal cost / mo": monthly_internal_total,
-                "Margin": monthly_total - monthly_internal_total,
-            }])
-            st.dataframe(total_row, use_container_width=True, hide_index=True)
         oa1, oa2, oa3 = st.columns(3)
         if oa1.button("+ API Maintenance ($500/mo)", use_container_width=True):
             new_row = pd.DataFrame([monthly_row("API Maintenance", 1, 500, False, "Per Graas account / brand")])
