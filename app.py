@@ -478,7 +478,7 @@ defaults = {
     ]),
     "monthly_df": pd.DataFrame([], columns=MONTHLY_COLS),
     "tier_orders": 2000.0, "tier_threshold": 2500.0, "tier_rate1": 1.95, "tier_rate2": 1.30,
-    "quote_text": "", "recipient_name": "",
+    "quote_text": "", "recipient_name": "", "quote_subject": "",
 }
 for k, v in defaults.items():
     if k not in st.session_state:
@@ -767,6 +767,13 @@ with tab_build:
             client_name = st.session_state.client or "[Client]"
             ptype = st.session_state.ptype
 
+            # --- SUBJECT (matches the "Client <> Graas - Project" convention used in past emails,
+            # e.g. "Actually <> Graas - Vend integration upgrade customisation") ---
+            subject_suffix = " customisation" if ptype in (
+                "Custom API Integration", "POS / Vend-style Integration"
+            ) else ""
+            st.session_state.quote_subject = f"{client_name} <> Graas - {project}{subject_suffix}"
+
             # --- INTRO (plain text — copy this first) ---
             intro = [f"Hi {recipient},", ""]
             intro.append(
@@ -847,6 +854,10 @@ with tab_build:
                 "selecting and copying them keeps the table formatting when pasted into Gmail/Outlook "
                 "(a plain text box can't do that). This draft is built only from billable figures — "
                 "Internal cost/unit and Margin are never read here, so they can't leak into a client email."
+            )
+            st.markdown("**Subject line** (editable):")
+            st.session_state.quote_subject = st.text_input(
+                "Subject", st.session_state.quote_subject, label_visibility="collapsed"
             )
             st.markdown("**1) Copy this intro:**")
             st.text_area("Intro", st.session_state.quote_intro, height=180, label_visibility="collapsed")
