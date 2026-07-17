@@ -135,6 +135,18 @@ def _row_effort_days(rows):
     return total
 
 
+def _row_undiscounted_total(rows):
+    """Sum(qty * rate) ignoring the Apply-discount checkbox entirely — i.e. what the row would
+    bill at full rate-card price, before any negotiated discount. Used to show 'original pricing'
+    alongside the actual (possibly discounted) quoted total in the Tracker tab."""
+    total = 0
+    for r in rows or []:
+        qty = r.get("Qty/Days", r.get("Qty", 0)) or 0
+        rate = r.get("Unit rate", r.get("Unit rate / month", 0)) or 0
+        total += round_up(qty * rate) if (qty and rate) else 0
+    return total
+
+
 def load_all_costings() -> pd.DataFrame:
     conn = get_conn()
     df = pd.read_sql_query("SELECT * FROM costings", conn)
@@ -148,6 +160,7 @@ def load_all_costings() -> pd.DataFrame:
     monthly_rows_list = df["monthly_json"].apply(lambda s: json.loads(s) if s else [])
     df["internal_total"] = onetime_rows_list.apply(_row_internal_total) + monthly_rows_list.apply(_row_internal_total)
     df["quoted_effort_days"] = onetime_rows_list.apply(_row_effort_days)
+    df["original_pricing"] = onetime_rows_list.apply(_row_undiscounted_total) + monthly_rows_list.apply(_row_undiscounted_total)
 
     df["quoted_billable"] = df["onetime_total"] + df["monthly_total"]
     df["quoted_margin"] = df["quoted_billable"] - df["internal_total"]
@@ -264,7 +277,11 @@ def compute_line_totals(df: pd.DataFrame, qty_col: str, rate_col: str, discount_
         df["Internal cost total"] = []
         df["Margin"] = []
         return df
-    mult = df["Apply discount"].apply(lambda d: (1 - discount_pct / 100.0) if d else 1.0)
+    # Coerce explicitly to boolean first — a blank/unset checkbox can come through as NaN,
+    # and NaN is truthy in Python, which was silently applying the discount to rows whose
+    # checkbox was never actually ticked. fillna(False) closes that gap.
+    apply_disc = df["Apply discount"].fillna(False).astype(bool)
+    mult = apply_disc.apply(lambda d: (1 - discount_pct / 100.0) if d else 1.0)
     # Company convention: costing figures always round UP (ceiling), never nearest or down.
     df["Line total"] = (df[qty_col].fillna(0) * df[rate_col].fillna(0) * mult).apply(round_up)
     df["Internal cost total"] = (df[qty_col].fillna(0) * df.get("Internal cost/unit", 0).fillna(0)).apply(round_up)
@@ -460,7 +477,7 @@ defaults = {
     ]),
     "monthly_df": pd.DataFrame([], columns=MONTHLY_COLS),
     "tier_orders": 2000.0, "tier_threshold": 2500.0, "tier_rate1": 1.95, "tier_rate2": 1.30,
-    "quote_text": "",
+    "quote_text": "", "recipient_name": "",
 }
 for k, v in defaults.items():
     if k not in st.session_state:
@@ -526,10 +543,12 @@ with tab_build:
         st.divider()
         st.subheader("Rate card & discount")
         st.caption("Final Development & Deployment rate card: Project Manager and Tester/UAT are billed "
-                   "at the same rate, $200/day; Tech Developer is $350/day. Apply a preferential discount "
-                   "where negotiated (e.g. Actually Vend integration was 30% off card). All computed "
-                   "totals round UP, never to nearest or down — that's a fixed company convention, not "
-                   "just a display setting.")
+                   "at the same rate, $200/day; Tech Developer is $350/day. **This discount % is applied "
+                   "per row, not to the overall total** — it only affects rows where you've ticked "
+                   "'Apply discount' in the table below; unticked rows are billed at the full rate you "
+                   "entered, regardless of this percentage (e.g. Actually Vend integration ticked all "
+                   "three rows for a 30% off-card rate). All computed totals round UP, never to nearest "
+                   "or down — that's a fixed company convention, not just a display setting.")
         r1, r2, r3, r4 = st.columns(4)
         st.session_state.pm_rate = r1.number_input("PM rate / day", value=float(st.session_state.pm_rate))
         st.session_state.dev_rate = r2.number_input("Developer rate / day", value=float(st.session_state.dev_rate))
@@ -737,37 +756,90 @@ with tab_build:
             save_costing(record)
             st.success("Saved to the shared tracker.")
 
-        if st.button("Generate client quote", use_container_width=True):
+        st.session_state.recipient_name = st.text_input(
+            "Client contact name (for the email greeting)", st.session_state.recipient_name
+        )
+        if st.button("✉️ Generate client email draft", use_container_width=True):
             sym = CCY_SYMBOL.get(ccy, "")
-            lines = [
-                f"{st.session_state.client or '[Client]'} — {st.session_state.project or '[Project]'}",
-                f"({st.session_state.ptype})", "",
-            ]
-            if not onetime_calc.empty:
-                lines.append("One-time costs")
+            recipient = st.session_state.recipient_name.strip() or "there"
+            project = st.session_state.project or "[Project]"
+            client_name = st.session_state.client or "[Client]"
+            ptype = st.session_state.ptype
+
+            lines = [f"Hi {recipient},", ""]
+            lines.append(
+                f"Please find below the details of the additional solution you requested for "
+                f"{project}, including the scope of work and cost details."
+            )
+            if ptype in ("Custom API Integration", "POS / Vend-style Integration"):
+                lines.append("")
+                lines.append(
+                    "As this functionality is currently not available in TC, a custom integration "
+                    "is required. Accordingly, a one-time integration cost will apply, as discussed "
+                    "earlier."
+                )
+            lines.append("")
+
+            # --- ONE-TIME (billable only — Internal cost/Margin never enter this draft) ---
+            if not onetime_calc.empty and onetime_total > 0:
+                lines.append(f"One-time integration cost: {sym}{onetime_total:,.2f}")
+                quoted_effort = onetime_edited["Qty/Days"].sum() if not onetime_edited.empty else 0
+                if quoted_effort:
+                    lines.append(f"Estimated effort: {quoted_effort:.0f} working days (development and testing)")
+                lines.append("")
+                lines.append(f"{client_name}_ {project}")
+                lines.append("Scope\tPrice")
                 for _, rr in onetime_calc.iterrows():
-                    lines.append(f"{rr['Description']:<38}{sym}{rr['Line total']:,.2f}")
-                lines.append(f"{'Total':<38}{sym}{onetime_total:,.2f}")
+                    lines.append(f"{rr['Description']}\t{sym}{rr['Line total']:,.2f}")
+                lines.append(f"Total Cost\t{sym}{onetime_total:,.2f}")
                 lines.append("")
-            if not monthly_calc.empty:
-                lines.append("Monthly fees")
+
+            # --- MONTHLY (billable only) ---
+            if not monthly_calc.empty and monthly_total > 0:
+                lines.append(
+                    f"There will also be a monthly maintenance fee of {sym}{monthly_total:,.2f}, "
+                    f"applicable after integration is completed (second month onwards)."
+                )
+                lines.append("")
+                lines.append("Scope\tPrice / month")
                 for _, rr in monthly_calc.iterrows():
-                    lines.append(f"{rr['Description']:<38}{sym}{rr['Line total']:,.2f}")
-                lines.append(f"{'Total':<38}{sym}{monthly_total:,.2f} / month")
+                    lines.append(f"{rr['Description']}\t{sym}{rr['Line total']:,.2f}")
+                lines.append(f"Total\t{sym}{monthly_total:,.2f} / month")
                 lines.append("")
+
             if st.session_state.discount > 0:
-                lines.append(f"The above rate reflects a {st.session_state.discount:.0f}% preferential "
-                              f"discount from the Graas standard tech rate card.")
+                lines.append(
+                    f"The above rate reflects a preferential rate discounted {st.session_state.discount:.0f}% "
+                    f"from the Graas standard tech rate card."
+                )
+            lines.append(
+                "Please note that any scope changes or delays caused by external dependencies may "
+                "result in additional costs."
+            )
+            lines.append("")
             if st.session_state.terms:
                 lines.append(f"Payment terms: {st.session_state.terms}.")
+                lines.append("")
             if st.session_state.notes:
-                lines += ["", st.session_state.notes]
-            lines += ["", f"Currency: {ccy}. Prices in {ccy} unless noted."]
+                lines.append(st.session_state.notes)
+                lines.append("")
+            lines.append("Please confirm if this works for you, and we'll proceed accordingly.")
+            lines.append("")
+            lines.append("Regards,")
+            lines.append("PREETHY AK")
+            lines.append("Director- Marketplace Delivery")
+            lines.append("e. preethy@graas.ai")
+
             st.session_state.quote_text = "\n".join(lines)
 
         if st.session_state.quote_text:
-            st.text_area("Client-ready quote text", st.session_state.quote_text, height=280)
-            st.caption("Select all and copy — this matches the Scope/Price/Total format used with clients before.")
+            st.text_area("Client-ready email draft", st.session_state.quote_text, height=340)
+            st.caption(
+                "Select all and copy into your email client. This draft is built only from the "
+                "billable ('Unit rate' × qty, after any ticked discount) figures — Internal cost/unit "
+                "and Margin are never read when generating this text, so they can't leak into a client "
+                "email even by accident."
+            )
 
 # ============================================================================
 # TAB: TRACKER & HISTORY
@@ -820,18 +892,22 @@ with tab_tracker:
         st.metric("Pipeline (Yr-1 value, excluding Lost/Cancelled)", fmt_money(pipeline, "USD"))
 
         st.caption(
-            "Editable right here: **Stage**, **Final confirmed amount** (defaults to the quoted "
-            "billable total until you override it), and **Actual effort (days)** — fill that in once "
-            "a project wraps up to compare against what was quoted. Everything else is read-only "
+            "**Original pricing** is what these line items would bill at full rate-card price with no "
+            "discount applied — compare it against **Quoted billable** to see how much the **Discount %** "
+            "actually took off. Editable right here: **Stage**, **Final confirmed amount** (defaults to "
+            "the quoted billable total until you override it), and **Actual effort (days)** — fill that "
+            "in once a project wraps up to compare against what was quoted. Everything else is read-only "
             "(edit the underlying costing via 'Load into New costing form' below if it needs to change)."
         )
 
         edit_cols = ["id", "display_date", "client", "project", "type",
-                     "quoted_billable", "internal_total", "quoted_margin", "quoted_margin_pct",
+                     "original_pricing", "discount", "quoted_billable", "internal_total",
+                     "quoted_margin", "quoted_margin_pct",
                      "quoted_effort_days", "actual_effort_days", "effort_variance",
                      "final_amount_display", "final_margin", "stage", "currency", "source"]
         edit_df = df[edit_cols].rename(columns={
             "display_date": "Date", "client": "Client", "project": "Project", "type": "Type",
+            "original_pricing": "Original pricing (full card)", "discount": "Discount %",
             "quoted_billable": "Quoted billable", "internal_total": "Internal cost",
             "quoted_margin": "Quoted margin", "quoted_margin_pct": "Quoted margin %",
             "quoted_effort_days": "Quoted effort (days)", "actual_effort_days": "Actual effort (days)",
@@ -841,7 +917,8 @@ with tab_tracker:
 
         edited = st.data_editor(
             edit_df, use_container_width=True, hide_index=True, key="tracker_editor",
-            disabled=["id", "Date", "Client", "Project", "Type", "Quoted billable", "Internal cost",
+            disabled=["id", "Date", "Client", "Project", "Type", "Original pricing (full card)",
+                      "Discount %", "Quoted billable", "Internal cost",
                       "Quoted margin", "Quoted margin %", "Quoted effort (days)",
                       "Effort variance (days)", "Final margin", "Ccy", "Source"],
             column_config={
