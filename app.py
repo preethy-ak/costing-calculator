@@ -4,6 +4,7 @@ import sqlite3
 import json
 import os
 import uuid
+import math
 from datetime import datetime, date
 
 # ----------------------------------------------------------------------------
@@ -23,8 +24,24 @@ PROJECT_TYPES = [
     "Other",
 ]
 
-ONETIME_COLS = ["Description", "Qty/Days", "Unit rate", "Apply discount", "Remarks"]
-MONTHLY_COLS = ["Description", "Qty", "Unit rate / month", "Apply discount", "Remarks"]
+ONETIME_COLS = ["Description", "Qty/Days", "Unit rate", "Internal cost/unit", "Apply discount", "Remarks"]
+MONTHLY_COLS = ["Description", "Qty", "Unit rate / month", "Internal cost/unit", "Apply discount", "Remarks"]
+
+# Internal fully-loaded cost reference, from the "API & Integration Project Pricing" sheet:
+# Tech BU weekly cost $2,310 / 6-day week = $385/day; MP BU (PM) weekly cost $2,239 / 6-day week = $373.17/day.
+# No distinct internal rate was given for QC/testing, so it defaults to the Tech (developer) rate.
+# Final internal & external "Development & Deployment" rate card, per Preethy:
+# Internal cost/day — Project Manager $91, Tech Developer $136, Tech Tester+UAT $91 (same as PM).
+# External billable/day — Project Manager & Tester/UAT $200 (same rate), Tech Developer $350.
+INTERNAL_COST_DEFAULTS = {"pm": 91.0, "dev": 136.0, "qc": 91.0}
+EXTERNAL_RATE_DEFAULTS = {"pm": 200.0, "dev": 350.0, "qc": 200.0}
+
+
+def round_up(x):
+    """Company convention: always round costing figures UP, never down or to nearest."""
+    if x is None or (isinstance(x, float) and math.isnan(x)):
+        return x
+    return math.ceil(x)
 
 # ----------------------------------------------------------------------------
 # Storage (SQLite file next to the app — shared automatically by every visitor
@@ -166,23 +183,38 @@ def restore_from_csv(file):
 # ----------------------------------------------------------------------------
 # Row-level helpers
 # ----------------------------------------------------------------------------
-def onetime_row(desc="", qty=1.0, rate=0.0, disc=False, remarks=""):
+def onetime_row(desc="", qty=1.0, rate=0.0, disc=False, remarks="", internal=0.0):
     return {"Description": desc, "Qty/Days": qty, "Unit rate": rate,
-            "Apply discount": disc, "Remarks": remarks}
+            "Internal cost/unit": internal, "Apply discount": disc, "Remarks": remarks}
 
 
-def monthly_row(desc="", qty=1.0, rate=0.0, disc=False, remarks=""):
+def monthly_row(desc="", qty=1.0, rate=0.0, disc=False, remarks="", internal=0.0):
     return {"Description": desc, "Qty": qty, "Unit rate / month": rate,
-            "Apply discount": disc, "Remarks": remarks}
+            "Internal cost/unit": internal, "Apply discount": disc, "Remarks": remarks}
+
+
+def normalize_df(df: pd.DataFrame, cols: list) -> pd.DataFrame:
+    """Ensure a loaded/older record has every expected column (e.g. records saved before the
+    Internal cost/unit column existed) so nothing breaks on load."""
+    df = df.copy()
+    for c in cols:
+        if c not in df.columns:
+            df[c] = False if c == "Apply discount" else ("" if c == "Description" or c == "Remarks" else 0.0)
+    return df[cols]
 
 
 def compute_line_totals(df: pd.DataFrame, qty_col: str, rate_col: str, discount_pct: float) -> pd.DataFrame:
     df = df.copy()
     if df.empty:
         df["Line total"] = []
+        df["Internal cost total"] = []
+        df["Margin"] = []
         return df
     mult = df["Apply discount"].apply(lambda d: (1 - discount_pct / 100.0) if d else 1.0)
-    df["Line total"] = (df[qty_col].fillna(0) * df[rate_col].fillna(0) * mult).round(2)
+    # Company convention: costing figures always round UP (ceiling), never nearest or down.
+    df["Line total"] = (df[qty_col].fillna(0) * df[rate_col].fillna(0) * mult).apply(round_up)
+    df["Internal cost total"] = (df[qty_col].fillna(0) * df.get("Internal cost/unit", 0).fillna(0)).apply(round_up)
+    df["Margin"] = df["Line total"] - df["Internal cost total"]
     return df
 
 
@@ -194,14 +226,17 @@ def fmt_money(n, ccy="USD"):
 # ----------------------------------------------------------------------------
 # Templates (patterns pulled from past deal structures)
 # ----------------------------------------------------------------------------
-def apply_template(kind: str, pm, dev, qc):
+def apply_template(kind: str, pm, dev, qc, pm_i=None, dev_i=None, qc_i=None):
+    pm_i = INTERNAL_COST_DEFAULTS["pm"] if pm_i is None else pm_i
+    dev_i = INTERNAL_COST_DEFAULTS["dev"] if dev_i is None else dev_i
+    qc_i = INTERNAL_COST_DEFAULTS["qc"] if qc_i is None else qc_i
     st.session_state.discount = 0.0
     if kind == "api":
         st.session_state.ptype = "Custom API Integration"
         st.session_state.onetime_df = pd.DataFrame([
-            onetime_row("Project Management", 6, pm, False, "Deployed across effort duration"),
-            onetime_row("Tech Development", 8, dev, False, "API build + testing hooks"),
-            onetime_row("Testing & UAT", 3, qc, False, "Based on past PUMA UAT effort"),
+            onetime_row("Project Management", 6, pm, False, "Deployed across effort duration", internal=pm_i),
+            onetime_row("Tech Development", 8, dev, False, "API build + testing hooks", internal=dev_i),
+            onetime_row("Testing & UAT", 3, qc, False, "Based on past PUMA UAT effort", internal=qc_i),
         ])
         st.session_state.monthly_df = pd.DataFrame([], columns=MONTHLY_COLS)
         st.session_state.notes = ""
@@ -209,9 +244,9 @@ def apply_template(kind: str, pm, dev, qc):
         st.session_state.ptype = "POS / Vend-style Integration"
         st.session_state.discount = 30.0
         st.session_state.onetime_df = pd.DataFrame([
-            onetime_row("Project Management", 4, pm, True, "Preferential rate — 30% off standard card"),
-            onetime_row("Tech Development", 4, dev, True, "Custom order-pulling integration"),
-            onetime_row("Testing & UAT", 2, qc, True, ""),
+            onetime_row("Project Management", 4, pm, True, "Preferential rate — 30% off standard card", internal=pm_i),
+            onetime_row("Tech Development", 4, dev, True, "Custom order-pulling integration", internal=dev_i),
+            onetime_row("Testing & UAT", 2, qc, True, "", internal=qc_i),
         ])
         st.session_state.monthly_df = pd.DataFrame([], columns=MONTHLY_COLS)
         st.session_state.notes = ("Any scope changes or delays caused by external dependencies may "
@@ -229,11 +264,13 @@ def apply_template(kind: str, pm, dev, qc):
                                    "already on Graas WMS carries no new setup fee. Per the final Actually "
                                    "Group agreement (confirmed 29 Dec 2025), monthly maintenance is a "
                                    "single per-order fee across all warehouses, not a flat platform fee — "
-                                   "use the tiered per-order fee helper below to add it.")
+                                   "use the tiered per-order fee helper below to add it. No internal-cost "
+                                   "basis was given for warehouse setup fees, so Internal cost/unit "
+                                   "defaults to 0 here — fill it in if you have it.")
     elif kind == "extract":
         st.session_state.ptype = "Data Extract Service"
         st.session_state.onetime_df = pd.DataFrame([
-            onetime_row("Tech build — extract/API hook", 4, dev, False, "One-time build, up to 3 files/delivery"),
+            onetime_row("Tech build — extract/API hook", 4, dev, False, "One-time build, up to 3 files/delivery", internal=dev_i),
         ])
         st.session_state.monthly_df = pd.DataFrame([
             monthly_row("Extract — Daily frequency", 1, 250, False, "Per store, single location"),
@@ -272,15 +309,26 @@ def historical_records():
             type="POS / Vend-style Integration", currency="SGD", stage="Won", discount=30,
             pm_rate=250, dev_rate=350, qc_rate=180,
             onetime_rows=[
-                onetime_row("Project Management", 1, 1350, False, "Already reflects 30% preferential discount off standard card"),
-                onetime_row("Tech Development", 1, 1350, False, "End-to-end integration & deployment"),
-                onetime_row("Testing & UAT", 1, 500, False, "6 working days total effort (dev + testing)"),
+                onetime_row("Project Management", 6, 225.00, False,
+                             "6 man-days @ SGD225/day (= SGD1,350 total, already reflects 30% "
+                             "preferential discount off standard card)", internal=121.88),
+                onetime_row("Tech Development", 4, 337.50, False,
+                             "4 man-days @ SGD337.50/day (= SGD1,350 total) — end-to-end integration & deployment",
+                             internal=182.15),
+                onetime_row("Testing & UAT", 2, 250.00, False,
+                             "2 man-days @ SGD250/day (= SGD500 total)", internal=121.88),
             ],
             monthly_rows=[],
             notes=("Confirmed with Kane Gan (Actually Group) via email — covers all offline stores "
                    "(SG, MY, ID) at no extra charge for adding future stores. 50% prepayment before "
                    "project initiation, 50% on completion. Vend integration billed separately from the "
-                   "WMS contract."),
+                   "WMS contract. Internal cost basis: PM $91/day, Tech Developer $136/day, Tech "
+                   "Tester+UAT $91/day (USD), across 6/4/2 man-days respectively — USD1,273 total, "
+                   "SGD1,705 at the FX used in that internal costing sheet (~1.34). That gives a margin "
+                   "of roughly SGD1,495 (~47%) on this deal — note this internal cost basis is specific "
+                   "to this project's actual staffing plan, and is NOT the same figure as the generic "
+                   "Tech/MP BU rate-card cost ($385/$373 per day) used elsewhere in this app as a default "
+                   "— the two shouldn't be mixed."),
             terms="50% prepayment before project initiation, 50% upon project completion",
             onetime_total=3200, monthly_total=0,
             source='Email: "Re: WMS" thread, 18 Jan 2026 — Preethy AK to Kane Gan',
@@ -346,12 +394,15 @@ def seed_historical():
 defaults = {
     "client": "", "project": "", "ptype": "Custom API Integration",
     "currency": "USD", "currency2": "—", "fx": 1.35, "stage": "Proposed", "source": "",
-    "pm_rate": 250.0, "dev_rate": 350.0, "qc_rate": 180.0, "discount": 0.0,
+    "pm_rate": EXTERNAL_RATE_DEFAULTS["pm"], "dev_rate": EXTERNAL_RATE_DEFAULTS["dev"],
+    "qc_rate": EXTERNAL_RATE_DEFAULTS["qc"], "discount": 0.0,
+    "pm_internal": INTERNAL_COST_DEFAULTS["pm"], "dev_internal": INTERNAL_COST_DEFAULTS["dev"],
+    "qc_internal": INTERNAL_COST_DEFAULTS["qc"],
     "terms": "50% prepayment before start, 50% on completion", "notes": "",
     "onetime_df": pd.DataFrame([
-        onetime_row("Project Management", 6, 250, False, "Deployed across effort duration"),
-        onetime_row("Tech Development", 8, 350, False, "API build + testing hooks"),
-        onetime_row("Testing & UAT", 3, 180, False, "Based on past PUMA UAT effort"),
+        onetime_row("Project Management", 6, 250, False, "Deployed across effort duration", internal=INTERNAL_COST_DEFAULTS["pm"]),
+        onetime_row("Tech Development", 8, 350, False, "API build + testing hooks", internal=INTERNAL_COST_DEFAULTS["dev"]),
+        onetime_row("Testing & UAT", 3, 180, False, "Based on past PUMA UAT effort", internal=INTERNAL_COST_DEFAULTS["qc"]),
     ]),
     "monthly_df": pd.DataFrame([], columns=MONTHLY_COLS),
     "tier_orders": 2000.0, "tier_threshold": 2500.0, "tier_rate1": 1.95, "tier_rate2": 1.30,
@@ -403,50 +454,71 @@ with tab_build:
                    "WMS warehouse fees, extract services). Loads typical line items — edit anything after.")
         b1, b2, b3, b4, b5 = st.columns(5)
         if b1.button("Custom API Integration", use_container_width=True):
-            apply_template("api", st.session_state.pm_rate, st.session_state.dev_rate, st.session_state.qc_rate)
+            apply_template("api", st.session_state.pm_rate, st.session_state.dev_rate, st.session_state.qc_rate, st.session_state.pm_internal, st.session_state.dev_internal, st.session_state.qc_internal)
             st.rerun()
         if b2.button("Vend / POS Integration", use_container_width=True):
-            apply_template("vend", st.session_state.pm_rate, st.session_state.dev_rate, st.session_state.qc_rate)
+            apply_template("vend", st.session_state.pm_rate, st.session_state.dev_rate, st.session_state.qc_rate, st.session_state.pm_internal, st.session_state.dev_internal, st.session_state.qc_internal)
             st.rerun()
         if b3.button("WMS Warehouse Setup", use_container_width=True):
-            apply_template("wms", st.session_state.pm_rate, st.session_state.dev_rate, st.session_state.qc_rate)
+            apply_template("wms", st.session_state.pm_rate, st.session_state.dev_rate, st.session_state.qc_rate, st.session_state.pm_internal, st.session_state.dev_internal, st.session_state.qc_internal)
             st.rerun()
         if b4.button("Data Extract Service", use_container_width=True):
-            apply_template("extract", st.session_state.pm_rate, st.session_state.dev_rate, st.session_state.qc_rate)
+            apply_template("extract", st.session_state.pm_rate, st.session_state.dev_rate, st.session_state.qc_rate, st.session_state.pm_internal, st.session_state.dev_internal, st.session_state.qc_internal)
             st.rerun()
         if b5.button("Clear form", use_container_width=True):
-            apply_template("clear", st.session_state.pm_rate, st.session_state.dev_rate, st.session_state.qc_rate)
+            apply_template("clear", st.session_state.pm_rate, st.session_state.dev_rate, st.session_state.qc_rate, st.session_state.pm_internal, st.session_state.dev_internal, st.session_state.qc_internal)
             st.rerun()
 
         st.divider()
         st.subheader("Rate card & discount")
-        st.caption("Standard Graas new-development rate card is Project Manager $250/day and Developer "
-                   "$350/day. Apply a preferential discount where negotiated (e.g. Actually Vend "
-                   "integration was 30% off card).")
+        st.caption("Final Development & Deployment rate card: Project Manager and Tester/UAT are billed "
+                   "at the same rate, $200/day; Tech Developer is $350/day. Apply a preferential discount "
+                   "where negotiated (e.g. Actually Vend integration was 30% off card). All computed "
+                   "totals round UP, never to nearest or down — that's a fixed company convention, not "
+                   "just a display setting.")
         r1, r2, r3, r4 = st.columns(4)
         st.session_state.pm_rate = r1.number_input("PM rate / day", value=float(st.session_state.pm_rate))
         st.session_state.dev_rate = r2.number_input("Developer rate / day", value=float(st.session_state.dev_rate))
-        st.session_state.qc_rate = r3.number_input("Tester/QC rate / day", value=float(st.session_state.qc_rate))
+        st.session_state.qc_rate = r3.number_input("Tester/QC rate / day (same as PM by default)", value=float(st.session_state.qc_rate))
         st.session_state.discount = r4.number_input("Rate card discount %", value=float(st.session_state.discount))
+
+        with st.expander("Internal cost card (for margin visibility)", expanded=False):
+            st.caption(
+                "Final internal cost/day: Project Manager $91, Tech Developer $136, Tech Tester+UAT $91 "
+                "(same as PM). This replaces the earlier BU-average reference figures — those measured "
+                "something different (broad department overhead) and shouldn't be used for per-deal "
+                "margin. Edit these only if you have a more specific number for a particular deal."
+            )
+            ic1, ic2, ic3 = st.columns(3)
+            st.session_state.pm_internal = ic1.number_input("PM internal cost / day", value=float(st.session_state.pm_internal))
+            st.session_state.dev_internal = ic2.number_input("Developer internal cost / day", value=float(st.session_state.dev_internal))
+            st.session_state.qc_internal = ic3.number_input("Tester/QC internal cost / day (same as PM by default)", value=float(st.session_state.qc_internal))
 
         st.divider()
         st.subheader("One-time costs")
-        st.caption('Development effort, setup fees, or any one-off line item. Tick "Apply discount" to '
-                   "apply the rate-card discount above to that row.")
+        st.caption('Development effort, setup fees, or any one-off line item. "Internal cost/unit" is '
+                   'optional — fill it in to see cost and margin alongside the billable price. Tick '
+                   '"Apply discount" to apply the rate-card discount above to that row.')
         onetime_edited = st.data_editor(
-            st.session_state.onetime_df, num_rows="dynamic", use_container_width=True,
+            normalize_df(st.session_state.onetime_df, ONETIME_COLS), num_rows="dynamic", use_container_width=True,
             key="onetime_editor",
             column_config={
                 "Qty/Days": st.column_config.NumberColumn(format="%.2f"),
                 "Unit rate": st.column_config.NumberColumn(format="%.2f"),
+                "Internal cost/unit": st.column_config.NumberColumn(format="%.2f"),
                 "Apply discount": st.column_config.CheckboxColumn(),
             },
         )
         st.session_state.onetime_df = onetime_edited
         onetime_calc = compute_line_totals(onetime_edited, "Qty/Days", "Unit rate", st.session_state.discount)
         onetime_total = onetime_calc["Line total"].sum() if not onetime_calc.empty else 0.0
+        onetime_internal_total = onetime_calc["Internal cost total"].sum() if not onetime_calc.empty else 0.0
         if not onetime_calc.empty:
-            st.dataframe(onetime_calc[["Description", "Line total"]], use_container_width=True, hide_index=True)
+            st.dataframe(
+                onetime_calc[["Description", "Line total", "Internal cost total", "Margin"]]
+                    .rename(columns={"Line total": "Billable", "Internal cost total": "Internal cost"}),
+                use_container_width=True, hide_index=True,
+            )
 
         b_t1, b_t2 = st.columns(2)
         st.session_state.terms = st.text_input("Payment terms", st.session_state.terms)
@@ -454,21 +526,27 @@ with tab_build:
         st.divider()
         st.subheader("Monthly recurring fees")
         st.caption("Maintenance, subscriptions, per-order fees. These roll into the annualized "
-                   "contract value on the right.")
+                   "contract value on the right. Internal cost/unit is optional, same as above.")
         monthly_edited = st.data_editor(
-            st.session_state.monthly_df, num_rows="dynamic", use_container_width=True,
+            normalize_df(st.session_state.monthly_df, MONTHLY_COLS), num_rows="dynamic", use_container_width=True,
             key="monthly_editor",
             column_config={
                 "Qty": st.column_config.NumberColumn(format="%.2f"),
                 "Unit rate / month": st.column_config.NumberColumn(format="%.2f"),
+                "Internal cost/unit": st.column_config.NumberColumn(format="%.2f"),
                 "Apply discount": st.column_config.CheckboxColumn(),
             },
         )
         st.session_state.monthly_df = monthly_edited
         monthly_calc = compute_line_totals(monthly_edited, "Qty", "Unit rate / month", st.session_state.discount)
         monthly_total = monthly_calc["Line total"].sum() if not monthly_calc.empty else 0.0
+        monthly_internal_total = monthly_calc["Internal cost total"].sum() if not monthly_calc.empty else 0.0
         if not monthly_calc.empty:
-            st.dataframe(monthly_calc[["Description", "Line total"]], use_container_width=True, hide_index=True)
+            st.dataframe(
+                monthly_calc[["Description", "Line total", "Internal cost total", "Margin"]]
+                    .rename(columns={"Line total": "Billable / mo", "Internal cost total": "Internal cost / mo"}),
+                use_container_width=True, hide_index=True,
+            )
 
         st.caption("Optional add-ons — not included unless you click one:")
         oa1, oa2, oa3 = st.columns(3)
@@ -518,8 +596,8 @@ with tab_build:
         ccy = st.session_state.currency
         annual = onetime_total + monthly_total * 12
         m1, m2 = st.columns(2)
-        m1.metric("One-time total", fmt_money(onetime_total, ccy))
-        m2.metric("Monthly recurring", fmt_money(monthly_total, ccy) + " /mo")
+        m1.metric("One-time total (billable)", fmt_money(onetime_total, ccy))
+        m2.metric("Monthly recurring (billable)", fmt_money(monthly_total, ccy) + " /mo")
         m1.metric("Year-1 contract value", fmt_money(annual, ccy))
         m2.metric("Total (one-time + monthly)", fmt_money(onetime_total + monthly_total, ccy))
 
@@ -529,6 +607,22 @@ with tab_build:
 
         st.progress(min(st.session_state.discount / 100.0, 1.0),
                     text=f"{st.session_state.discount:.0f}% rate-card discount applied")
+
+        total_internal = onetime_internal_total + monthly_internal_total
+        total_billable = onetime_total + monthly_total
+        if total_internal > 0:
+            st.divider()
+            st.caption("Cost & margin (only counts rows where you've filled in Internal cost/unit)")
+            cm1, cm2 = st.columns(2)
+            cm1.metric("Internal cost (one-time)", fmt_money(onetime_internal_total, ccy))
+            cm2.metric("Internal cost (monthly)", fmt_money(monthly_internal_total, ccy) + " /mo")
+            margin_amt = total_billable - total_internal
+            margin_pct = (margin_amt / total_billable * 100) if total_billable else 0.0
+            cm1.metric("Margin", fmt_money(margin_amt, ccy))
+            cm2.metric("Margin %", f"{margin_pct:.1f}%")
+            if margin_amt < 0:
+                st.warning("Billable total is below internal cost on the rows you've priced — "
+                           "worth a second look before sending this out.")
 
         st.divider()
         if st.button("Save to tracker", type="primary", use_container_width=True):
@@ -668,8 +762,8 @@ with tab_tracker:
                 st.session_state.qc_rate = rec["qc_rate"]
                 st.session_state.notes = rec["notes"] or ""
                 st.session_state.terms = rec["terms"] or ""
-                st.session_state.onetime_df = pd.DataFrame(rec["onetime_rows"]) if rec["onetime_rows"] else pd.DataFrame([], columns=ONETIME_COLS)
-                st.session_state.monthly_df = pd.DataFrame(rec["monthly_rows"]) if rec["monthly_rows"] else pd.DataFrame([], columns=MONTHLY_COLS)
+                st.session_state.onetime_df = normalize_df(pd.DataFrame(rec["onetime_rows"]), ONETIME_COLS) if rec["onetime_rows"] else pd.DataFrame([], columns=ONETIME_COLS)
+                st.session_state.monthly_df = normalize_df(pd.DataFrame(rec["monthly_rows"]), MONTHLY_COLS) if rec["monthly_rows"] else pd.DataFrame([], columns=MONTHLY_COLS)
                 st.success("Loaded — switch to the \"New costing\" tab to edit and re-save.")
             if lc2.button("Delete this costing", use_container_width=True):
                 delete_costing(cid)
