@@ -563,12 +563,14 @@ with tab_build:
         onetime_prev_internal = onetime_prev["Internal cost total"].sum() if not onetime_prev.empty else 0.0
         onetime_merged_in = onetime_prev.rename(columns={"Line total": "Billable", "Internal cost total": "Internal cost"})
         onetime_total_row = pd.DataFrame([{
-            "Description": "Total", "Qty/Days": None, "Unit rate": None, "Internal cost/unit": None,
-            "Apply discount": False, "Remarks": "",
+            "Description": "Total", "Qty/Days": float("nan"), "Unit rate": float("nan"),
+            "Internal cost/unit": float("nan"), "Apply discount": False, "Remarks": "",
             "Billable": onetime_prev_total, "Internal cost": onetime_prev_internal,
             "Margin": onetime_prev_total - onetime_prev_internal,
         }])
-        onetime_editor_input = pd.concat([onetime_merged_in, onetime_total_row], ignore_index=True)
+        onetime_col_order = ["Description", "Qty/Days", "Unit rate", "Internal cost/unit",
+                              "Billable", "Internal cost", "Margin", "Apply discount", "Remarks"]
+        onetime_editor_input = pd.concat([onetime_merged_in, onetime_total_row], ignore_index=True)[onetime_col_order]
         onetime_edited_full = st.data_editor(
             onetime_editor_input, num_rows="dynamic", use_container_width=True,
             key="onetime_editor",
@@ -606,12 +608,14 @@ with tab_build:
         monthly_prev_internal = monthly_prev["Internal cost total"].sum() if not monthly_prev.empty else 0.0
         monthly_merged_in = monthly_prev.rename(columns={"Line total": "Billable / mo", "Internal cost total": "Internal cost / mo"})
         monthly_total_row = pd.DataFrame([{
-            "Description": "Total", "Qty": None, "Unit rate / month": None, "Internal cost/unit": None,
-            "Apply discount": False, "Remarks": "",
+            "Description": "Total", "Qty": float("nan"), "Unit rate / month": float("nan"),
+            "Internal cost/unit": float("nan"), "Apply discount": False, "Remarks": "",
             "Billable / mo": monthly_prev_total, "Internal cost / mo": monthly_prev_internal,
             "Margin": monthly_prev_total - monthly_prev_internal,
         }])
-        monthly_editor_input = pd.concat([monthly_merged_in, monthly_total_row], ignore_index=True)
+        monthly_col_order = ["Description", "Qty", "Unit rate / month", "Internal cost/unit",
+                              "Billable / mo", "Internal cost / mo", "Margin", "Apply discount", "Remarks"]
+        monthly_editor_input = pd.concat([monthly_merged_in, monthly_total_row], ignore_index=True)[monthly_col_order]
         monthly_edited_full = st.data_editor(
             monthly_editor_input, num_rows="dynamic", use_container_width=True,
             key="monthly_editor",
