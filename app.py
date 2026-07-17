@@ -73,6 +73,12 @@ def get_conn():
         )"""
     )
     conn.commit()
+    # Migration: add columns introduced after initial release, for DBs created before them.
+    existing_cols = {row[1] for row in conn.execute("PRAGMA table_info(costings)").fetchall()}
+    for col, coltype in [("actual_effort_days", "REAL"), ("final_amount", "REAL")]:
+        if col not in existing_cols:
+            conn.execute(f"ALTER TABLE costings ADD COLUMN {col} {coltype}")
+    conn.commit()
     return conn
 
 
@@ -82,8 +88,8 @@ def save_costing(record: dict):
         """INSERT OR REPLACE INTO costings
         (id, saved_at, date_label, client, project, type, currency, stage, source,
          discount, pm_rate, dev_rate, qc_rate, onetime_json, monthly_json, notes,
-         terms, onetime_total, monthly_total)
-        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+         terms, onetime_total, monthly_total, actual_effort_days, final_amount)
+        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
         (
             record["id"], record["saved_at"], record.get("date_label", ""),
             record["client"], record["project"], record["type"], record["currency"],
@@ -92,10 +98,41 @@ def save_costing(record: dict):
             json.dumps(record["onetime_rows"]), json.dumps(record["monthly_rows"]),
             record.get("notes", ""), record.get("terms", ""),
             record["onetime_total"], record["monthly_total"],
+            record.get("actual_effort_days"), record.get("final_amount"),
         ),
     )
     conn.commit()
     conn.close()
+
+
+def update_tracker_fields(cid: str, stage: str, final_amount, actual_effort_days):
+    """Used by the Tracker tab's inline editor — updates only stage/final amount/actual effort,
+    leaving the rest of the record (line items, notes, etc.) untouched."""
+    conn = get_conn()
+    conn.execute(
+        "UPDATE costings SET stage=?, final_amount=?, actual_effort_days=? WHERE id=?",
+        (stage, final_amount, actual_effort_days, cid),
+    )
+    conn.commit()
+    conn.close()
+
+
+def _row_internal_total(rows):
+    """Sum(qty * internal_cost_per_unit), rounded up per line — same convention as compute_line_totals."""
+    total = 0
+    for r in rows or []:
+        qty = r.get("Qty/Days", r.get("Qty", 0)) or 0
+        internal = r.get("Internal cost/unit", 0) or 0
+        total += round_up(qty * internal) if (qty and internal) else 0
+    return total
+
+
+def _row_effort_days(rows):
+    """Sum of Qty/Days across one-time rows — used as the 'quoted effort' figure."""
+    total = 0.0
+    for r in rows or []:
+        total += r.get("Qty/Days", 0) or 0
+    return total
 
 
 def load_all_costings() -> pd.DataFrame:
@@ -106,6 +143,23 @@ def load_all_costings() -> pd.DataFrame:
         return df
     df["yr1_value"] = df["onetime_total"] + df["monthly_total"] * 12
     df["display_date"] = df["date_label"].where(df["date_label"].astype(bool), df["saved_at"])
+
+    onetime_rows_list = df["onetime_json"].apply(lambda s: json.loads(s) if s else [])
+    monthly_rows_list = df["monthly_json"].apply(lambda s: json.loads(s) if s else [])
+    df["internal_total"] = onetime_rows_list.apply(_row_internal_total) + monthly_rows_list.apply(_row_internal_total)
+    df["quoted_effort_days"] = onetime_rows_list.apply(_row_effort_days)
+
+    df["quoted_billable"] = df["onetime_total"] + df["monthly_total"]
+    df["quoted_margin"] = df["quoted_billable"] - df["internal_total"]
+    df["quoted_margin_pct"] = df.apply(
+        lambda r: round(r["quoted_margin"] / r["quoted_billable"] * 100, 1) if r["quoted_billable"] else 0.0, axis=1
+    )
+
+    # "Final" figures fall back to the quoted ones until Preethy fills in an actual amount/effort.
+    df["final_amount_display"] = df["final_amount"].where(df["final_amount"].notna(), df["quoted_billable"])
+    df["final_margin"] = df["final_amount_display"] - df["internal_total"]
+    df["effort_variance"] = df["quoted_effort_days"] - df["actual_effort_days"]
+
     df = df.sort_values("saved_at", ascending=False)
     return df
 
@@ -514,11 +568,17 @@ with tab_build:
         onetime_total = onetime_calc["Line total"].sum() if not onetime_calc.empty else 0.0
         onetime_internal_total = onetime_calc["Internal cost total"].sum() if not onetime_calc.empty else 0.0
         if not onetime_calc.empty:
-            st.dataframe(
+            display_tbl = (
                 onetime_calc[["Description", "Line total", "Internal cost total", "Margin"]]
-                    .rename(columns={"Line total": "Billable", "Internal cost total": "Internal cost"}),
-                use_container_width=True, hide_index=True,
+                .rename(columns={"Line total": "Billable", "Internal cost total": "Internal cost"})
             )
+            total_row = pd.DataFrame([{
+                "Description": "Total",
+                "Billable": onetime_total,
+                "Internal cost": onetime_internal_total,
+                "Margin": onetime_total - onetime_internal_total,
+            }])
+            st.dataframe(pd.concat([display_tbl, total_row], ignore_index=True), use_container_width=True, hide_index=True)
 
         b_t1, b_t2 = st.columns(2)
         st.session_state.terms = st.text_input("Payment terms", st.session_state.terms)
@@ -542,11 +602,17 @@ with tab_build:
         monthly_total = monthly_calc["Line total"].sum() if not monthly_calc.empty else 0.0
         monthly_internal_total = monthly_calc["Internal cost total"].sum() if not monthly_calc.empty else 0.0
         if not monthly_calc.empty:
-            st.dataframe(
+            display_tbl = (
                 monthly_calc[["Description", "Line total", "Internal cost total", "Margin"]]
-                    .rename(columns={"Line total": "Billable / mo", "Internal cost total": "Internal cost / mo"}),
-                use_container_width=True, hide_index=True,
+                .rename(columns={"Line total": "Billable / mo", "Internal cost total": "Internal cost / mo"})
             )
+            total_row = pd.DataFrame([{
+                "Description": "Total",
+                "Billable / mo": monthly_total,
+                "Internal cost / mo": monthly_internal_total,
+                "Margin": monthly_total - monthly_internal_total,
+            }])
+            st.dataframe(pd.concat([display_tbl, total_row], ignore_index=True), use_container_width=True, hide_index=True)
 
         st.caption("Optional add-ons — not included unless you click one:")
         oa1, oa2, oa3 = st.columns(3)
@@ -732,14 +798,66 @@ with tab_tracker:
         pipeline = df[~df["stage"].isin(["Lost", "Cancelled"])]["yr1_value"].sum()
         st.metric("Pipeline (Yr-1 value, excluding Lost/Cancelled)", fmt_money(pipeline, "USD"))
 
-        show_cols = ["display_date", "client", "project", "type", "stage",
-                     "onetime_total", "monthly_total", "yr1_value", "currency", "source"]
-        display_df = df[show_cols].rename(columns={
+        st.caption(
+            "Editable right here: **Stage**, **Final confirmed amount** (defaults to the quoted "
+            "billable total until you override it), and **Actual effort (days)** — fill that in once "
+            "a project wraps up to compare against what was quoted. Everything else is read-only "
+            "(edit the underlying costing via 'Load into New costing form' below if it needs to change)."
+        )
+
+        edit_cols = ["id", "display_date", "client", "project", "type",
+                     "quoted_billable", "internal_total", "quoted_margin", "quoted_margin_pct",
+                     "quoted_effort_days", "actual_effort_days", "effort_variance",
+                     "final_amount_display", "final_margin", "stage", "currency", "source"]
+        edit_df = df[edit_cols].rename(columns={
             "display_date": "Date", "client": "Client", "project": "Project", "type": "Type",
-            "stage": "Stage", "onetime_total": "One-time", "monthly_total": "Monthly",
-            "yr1_value": "Yr-1 value", "currency": "Ccy", "source": "Source",
+            "quoted_billable": "Quoted billable", "internal_total": "Internal cost",
+            "quoted_margin": "Quoted margin", "quoted_margin_pct": "Quoted margin %",
+            "quoted_effort_days": "Quoted effort (days)", "actual_effort_days": "Actual effort (days)",
+            "effort_variance": "Effort variance (days)", "final_amount_display": "Final confirmed amount",
+            "final_margin": "Final margin", "stage": "Stage", "currency": "Ccy", "source": "Source",
         })
-        st.dataframe(display_df, use_container_width=True, hide_index=True)
+
+        edited = st.data_editor(
+            edit_df, use_container_width=True, hide_index=True, key="tracker_editor",
+            disabled=["id", "Date", "Client", "Project", "Type", "Quoted billable", "Internal cost",
+                      "Quoted margin", "Quoted margin %", "Quoted effort (days)",
+                      "Effort variance (days)", "Final margin", "Ccy", "Source"],
+            column_config={
+                "id": None,  # hide the raw id column but keep it in the dataframe for saving
+                "Stage": st.column_config.SelectboxColumn(options=STAGES),
+                "Actual effort (days)": st.column_config.NumberColumn(format="%.2f"),
+                "Final confirmed amount": st.column_config.NumberColumn(format="%.2f"),
+            },
+        )
+
+        if st.button("💾 Save changes to Stage / Final amount / Actual effort", type="primary"):
+            n = 0
+            for _, r in edited.iterrows():
+                orig = df[df["id"] == r["id"]].iloc[0]
+                stage_changed = r["Stage"] != orig["stage"]
+                final_changed = r["Final confirmed amount"] != orig["final_amount_display"]
+                actual_changed = (r["Actual effort (days)"] if pd.notna(r["Actual effort (days)"]) else None) != \
+                                  (orig["actual_effort_days"] if pd.notna(orig["actual_effort_days"]) else None)
+                if stage_changed or final_changed or actual_changed:
+                    update_tracker_fields(
+                        r["id"], r["Stage"],
+                        None if pd.isna(r["Final confirmed amount"]) else float(r["Final confirmed amount"]),
+                        None if pd.isna(r["Actual effort (days)"]) else float(r["Actual effort (days)"]),
+                    )
+                    n += 1
+            if n:
+                st.success(f"Updated {n} record(s).")
+                st.rerun()
+            else:
+                st.info("No changes to save.")
+
+        overs = df[df["effort_variance"].notna() & (df["effort_variance"] < 0)]
+        if not overs.empty:
+            st.warning(
+                "These deals took **more** effort than quoted (negative variance = over-effort vs. "
+                "the quote): " + ", ".join(f"{r.client} ({r.effort_variance:+.1f}d)" for r in overs.itertuples())
+            )
 
         st.divider()
         st.subheader("Load or delete a saved costing")
